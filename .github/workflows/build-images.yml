@@ -221,6 +221,12 @@ jobs:
             echo "Invalid source/api/rust-toolchain: ${rust_toolchain}" >&2
             exit 1
           }
+          dependency_fingerprint="$(sha256sum \
+            $(find source/api -type f \( -name 'Cargo.toml' -o -name 'Cargo.lock' \) -print | sort) \
+            source/api/rust-toolchain \
+            source/api/Dockerfile.prod \
+            source/api/Dockerfile.worker.prod \
+            | sha256sum | cut -c1-16)"
 
           image_prefix="${REQUEST_IMAGE_PREFIX}"
           if [[ -z "${image_prefix}" ]]; then
@@ -255,6 +261,7 @@ jobs:
           {
             echo "source_revision=${source_revision}"
             echo "rust_toolchain=${rust_toolchain}"
+            echo "dependency_fingerprint=${dependency_fingerprint}"
             echo "image_prefix=${image_prefix}"
             echo "image_tag=${image_tag}"
             echo "build_images=${build_images}"
@@ -268,6 +275,7 @@ jobs:
             echo "- Target: \\`${REQUEST_DEPLOY_TARGET}\\`"
             echo "- Action: \\`${REQUEST_PIPELINE_ACTION}\\`"
             echo "- Image prefix: \\`${image_prefix}\\`"
+            echo "- Dependency fingerprint: \\`${dependency_fingerprint}\\`"
             echo "- Image tag: \\`${image_tag}\\`"
             echo "- ARM64 only: \\`linux/arm64\\`"
             echo "- Cargo jobs: \\`${REQUEST_CARGO_BUILD_JOBS}\\`"
@@ -294,6 +302,22 @@ jobs:
           # as secrets in this public CI repository.
           username: ${{ secrets.REGISTRY_USERNAME || github.actor }}
           password: ${{ secrets.REGISTRY_PASSWORD || github.token }}
+
+      - name: Check existing Rust dependency image
+        id: rust_deps
+        if: ${{ steps.config.outputs.build_images == 'true' && (inputs.DEPLOY_TARGET == 'BE' || inputs.DEPLOY_TARGET == 'BE Build' || inputs.DEPLOY_TARGET == 'API' || inputs.DEPLOY_TARGET == 'Worker' || inputs.DEPLOY_TARGET == 'Deps') }}
+        shell: bash
+        env:
+          RUST_DEPS_IMAGE: ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-deps:rust-${{ steps.config.outputs.rust_toolchain }}-${{ steps.config.outputs.dependency_fingerprint }}
+        run: |
+          set -euo pipefail
+          if docker buildx imagetools inspect "${RUST_DEPS_IMAGE}" >/dev/null 2>&1; then
+            echo "Rust dependency image already exists: ${RUST_DEPS_IMAGE}"
+            echo 'exists=true' >> "${GITHUB_OUTPUT}"
+          else
+            echo "Rust dependency image is missing: ${RUST_DEPS_IMAGE}"
+            echo 'exists=false' >> "${GITHUB_OUTPUT}"
+          fi
 
       - name: Run API unit tests
         if: ${{ inputs.PIPELINE_ACTION != 'Deploy Only' && (inputs.DEPLOY_TARGET == 'BE Unit Test' || inputs.DEPLOY_TARGET == 'All Unit Tests' || ((inputs.DEPLOY_TARGET == 'BE' || inputs.DEPLOY_TARGET == 'API') && inputs.API_RUN_UNITTEST == 'true')) }}
@@ -343,7 +367,7 @@ jobs:
             sh -lc 'set -e; npm ci; npm run test:unit'
 
       - name: Build Rust dependency cache image
-        if: ${{ steps.config.outputs.build_images == 'true' && (inputs.DEPLOY_TARGET == 'BE' || inputs.DEPLOY_TARGET == 'BE Build' || inputs.DEPLOY_TARGET == 'API' || inputs.DEPLOY_TARGET == 'Worker' || inputs.DEPLOY_TARGET == 'Deps') }}
+        if: ${{ steps.config.outputs.build_images == 'true' && steps.rust_deps.outputs.exists != 'true' && (inputs.DEPLOY_TARGET == 'BE' || inputs.DEPLOY_TARGET == 'BE Build' || inputs.DEPLOY_TARGET == 'API' || inputs.DEPLOY_TARGET == 'Worker' || inputs.DEPLOY_TARGET == 'Deps') }}
         uses: docker/build-push-action@v6
         with:
           context: ./source/api
@@ -354,10 +378,12 @@ jobs:
           provenance: false
           sbom: false
           tags: |
-            ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-deps:rust-${{ steps.config.outputs.rust_toolchain }}
+            ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-deps:rust-${{ steps.config.outputs.rust_toolchain }}-${{ steps.config.outputs.dependency_fingerprint }}
           cache-from: |
-            type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-buildcache-deps:rust-${{ steps.config.outputs.rust_toolchain }}
-          cache-to: type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-buildcache-deps:rust-${{ steps.config.outputs.rust_toolchain }},mode=max
+            type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-buildcache-deps:rust-${{ steps.config.outputs.rust_toolchain }}-${{ steps.config.outputs.dependency_fingerprint }}
+          cache-to: |
+            type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-buildcache-deps:rust-${{ steps.config.outputs.rust_toolchain }}-${{ steps.config.outputs.dependency_fingerprint }},mode=max
+            type=inline
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             CARGO_BUILD_JOBS=${{ inputs.CARGO_BUILD_JOBS }}
@@ -375,7 +401,8 @@ jobs:
           sbom: false
           tags: ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-api:latest
           cache-from: |
-            type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-buildcache-deps:rust-${{ steps.config.outputs.rust_toolchain }}
+            type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-buildcache-deps:rust-${{ steps.config.outputs.rust_toolchain }}-${{ steps.config.outputs.dependency_fingerprint }}
+            type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-deps:rust-${{ steps.config.outputs.rust_toolchain }}-${{ steps.config.outputs.dependency_fingerprint }}
             type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-buildcache-api:rust-${{ steps.config.outputs.rust_toolchain }}
           cache-to: type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-buildcache-api:rust-${{ steps.config.outputs.rust_toolchain }},mode=max
           build-args: |
@@ -396,7 +423,8 @@ jobs:
           sbom: false
           tags: ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-worker:latest
           cache-from: |
-            type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-buildcache-deps:rust-${{ steps.config.outputs.rust_toolchain }}
+            type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-buildcache-deps:rust-${{ steps.config.outputs.rust_toolchain }}-${{ steps.config.outputs.dependency_fingerprint }}
+            type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-deps:rust-${{ steps.config.outputs.rust_toolchain }}-${{ steps.config.outputs.dependency_fingerprint }}
             type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-buildcache-worker:rust-${{ steps.config.outputs.rust_toolchain }}
           cache-to: type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-buildcache-worker:rust-${{ steps.config.outputs.rust_toolchain }},mode=max
           build-args: |

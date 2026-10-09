@@ -158,4 +158,6 @@ ghcr.io/hungcuongvt90/staging-cashsmartify-ui:latest
 
 The environment prefix prevents staging and production from overwriting each other's images while retaining the `latest` tag used by the current Kubernetes deployments.
 
+Rust dependency images are fingerprinted from the Cargo manifests, toolchain, and Dockerfiles. If the fingerprinted dependency image already exists for the same environment, the workflow reuses it and skips the dependency-image build. A dependency change creates a new cache image automatically.
+
 A `build-result-<REQUEST_ID>` artifact contains the source revision, image names, platform, and image digests for Jenkins diagnostics.
