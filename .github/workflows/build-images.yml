@@ -1,0 +1,488 @@
+name: Cashsmartify CI
+
+run-name: >-
+  ${{ inputs.PIPELINE_ACTION }} / ${{ inputs.DEPLOY_ENV }} /
+  ${{ inputs.DEPLOY_TARGET }} / ${{ inputs.IMAGE_TAG || 'source-sha' }} /
+  ${{ inputs.REQUEST_ID }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      DEPLOY_ENV:
+        description: Deployment environment used for image naming
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+        default: staging
+      DEPLOY_TARGET:
+        description: Same build/test target used by the Jenkins jobs
+        required: true
+        type: choice
+        options:
+          - BE
+          - UI
+          - API
+          - Worker
+          - Solver
+          - BE Build
+          - Deps
+          - BE Unit Test
+          - Solver Unit Test
+          - FE Unit Test
+          - All Unit Tests
+        default: BE
+      PIPELINE_ACTION:
+        description: Same action selector used by Jenkins
+        required: true
+        type: choice
+        options:
+          - Build+Deploy
+          - Build Only
+          - Deploy Only
+        default: Build+Deploy
+      SOURCE_REPO:
+        description: Source repository in owner/repository form
+        required: true
+        type: string
+        default: hungcuongvt90/mcc
+      BRANCH:
+        description: Branch, tag, or commit to build
+        required: true
+        type: string
+        default: develop
+      SOURCE_SHA:
+        description: Expected 40-character SHA checked out by Jenkins
+        required: false
+        type: string
+        default: ''
+      IMAGE_OWNER:
+        description: GHCR owner used in image names
+        required: true
+        type: string
+        default: hungcuongvt90
+      IMAGE_PREFIX:
+        description: Optional image prefix; empty derives from DEPLOY_ENV
+        required: false
+        type: string
+        default: ''
+      IMAGE_TAG:
+        description: Image tag; Jenkins uses latest for environment-separated images
+        required: false
+        type: string
+        default: latest
+      API_RUN_UNITTEST:
+        description: Run API tests before BE/API build
+        required: true
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+        default: 'false'
+      API_BYPASS_UNITTEST_FAILURE:
+        description: Continue BE/API build when the optional API test step fails
+        required: true
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+        default: 'false'
+      CARGO_BUILD_JOBS:
+        description: Cargo parallelism inside the ARM64 build containers
+        required: true
+        type: string
+        default: '4'
+      BACKUP_FILE:
+        description: Kept for Jenkins parameter compatibility; DB actions remain Jenkins-only
+        required: false
+        type: string
+        default: backup.sql
+      REQUEST_ID:
+        description: Jenkins correlation/build identifier
+        required: true
+        type: string
+        default: manual
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: cashsmartify-${{ inputs.DEPLOY_ENV }}-${{ inputs.DEPLOY_TARGET }}-${{ inputs.IMAGE_TAG || inputs.BRANCH }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  SOURCE_REPOSITORY: ${{ inputs.SOURCE_REPO }}
+  SOURCE_REF: ${{ inputs.BRANCH }}
+  DEPLOY_ENVIRONMENT: ${{ inputs.DEPLOY_ENV }}
+  DEPLOY_TARGET: ${{ inputs.DEPLOY_TARGET }}
+  PIPELINE_ACTION: ${{ inputs.PIPELINE_ACTION }}
+  IMAGE_OWNER: ${{ inputs.IMAGE_OWNER }}
+  API_RUN_UNITTEST: ${{ inputs.API_RUN_UNITTEST }}
+  API_BYPASS_UNITTEST_FAILURE: ${{ inputs.API_BYPASS_UNITTEST_FAILURE }}
+  CARGO_BUILD_JOBS: ${{ inputs.CARGO_BUILD_JOBS }}
+  REQUEST_ID: ${{ inputs.REQUEST_ID }}
+
+jobs:
+  ci:
+    name: ${{ inputs.PIPELINE_ACTION }} ${{ inputs.DEPLOY_TARGET }} for linux/arm64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.SOURCE_REPO }}
+          ref: ${{ inputs.BRANCH }}
+          # Public source repositories work with the default token. Private source
+          # repositories require SOURCE_REPO_READ_TOKEN in this repository's secrets.
+          token: ${{ secrets.SOURCE_REPO_READ_TOKEN || github.token }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate Jenkins request and resolve image names
+        id: config
+        shell: bash
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.SOURCE_SHA }}
+          REQUEST_SOURCE_REPO: ${{ inputs.SOURCE_REPO }}
+          REQUEST_SOURCE_REF: ${{ inputs.BRANCH }}
+          REQUEST_DEPLOY_ENV: ${{ inputs.DEPLOY_ENV }}
+          REQUEST_DEPLOY_TARGET: ${{ inputs.DEPLOY_TARGET }}
+          REQUEST_PIPELINE_ACTION: ${{ inputs.PIPELINE_ACTION }}
+          REQUEST_IMAGE_OWNER: ${{ inputs.IMAGE_OWNER }}
+          REQUEST_IMAGE_PREFIX: ${{ inputs.IMAGE_PREFIX }}
+          REQUEST_IMAGE_TAG: ${{ inputs.IMAGE_TAG }}
+          REQUEST_API_RUN_UNITTEST: ${{ inputs.API_RUN_UNITTEST }}
+          REQUEST_API_BYPASS_UNITTEST_FAILURE: ${{ inputs.API_BYPASS_UNITTEST_FAILURE }}
+          REQUEST_CARGO_BUILD_JOBS: ${{ inputs.CARGO_BUILD_JOBS }}
+          REQUEST_ID_VALUE: ${{ inputs.REQUEST_ID }}
+        run: |
+          set -euo pipefail
+
+          source_revision="$(git -C source rev-parse HEAD)"
+          if [[ -n "${EXPECTED_SOURCE_SHA}" && "${source_revision}" != "${EXPECTED_SOURCE_SHA}" ]]; then
+            echo "Checked out ${source_revision}, but Jenkins requested ${EXPECTED_SOURCE_SHA}" >&2
+            exit 1
+          fi
+
+          [[ "${REQUEST_SOURCE_REPO}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || {
+            echo "Invalid SOURCE_REPO: ${REQUEST_SOURCE_REPO}" >&2
+            exit 1
+          }
+          [[ -n "${REQUEST_SOURCE_REF}" ]] || {
+            echo "BRANCH must not be empty" >&2
+            exit 1
+          }
+          [[ "${REQUEST_DEPLOY_ENV}" =~ ^(staging|production)$ ]] || {
+            echo "Invalid DEPLOY_ENV: ${REQUEST_DEPLOY_ENV}" >&2
+            exit 1
+          }
+          [[ "${REQUEST_DEPLOY_TARGET}" =~ ^(BE|UI|API|Worker|Solver|BE\ Build|Deps|BE\ Unit\ Test|Solver\ Unit\ Test|FE\ Unit\ Test|All\ Unit\ Tests)$ ]] || {
+            echo "Invalid DEPLOY_TARGET: ${REQUEST_DEPLOY_TARGET}" >&2
+            exit 1
+          }
+          [[ "${REQUEST_PIPELINE_ACTION}" =~ ^(Build\+Deploy|Build\ Only|Deploy\ Only)$ ]] || {
+            echo "Invalid PIPELINE_ACTION: ${REQUEST_PIPELINE_ACTION}" >&2
+            exit 1
+          }
+          [[ "${REQUEST_IMAGE_OWNER}" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || {
+            echo "Invalid IMAGE_OWNER: ${REQUEST_IMAGE_OWNER}" >&2
+            exit 1
+          }
+          [[ "${REQUEST_API_RUN_UNITTEST}" =~ ^(true|false)$ ]] || {
+            echo "Invalid API_RUN_UNITTEST: ${REQUEST_API_RUN_UNITTEST}" >&2
+            exit 1
+          }
+          [[ "${REQUEST_API_BYPASS_UNITTEST_FAILURE}" =~ ^(true|false)$ ]] || {
+            echo "Invalid API_BYPASS_UNITTEST_FAILURE: ${REQUEST_API_BYPASS_UNITTEST_FAILURE}" >&2
+            exit 1
+          }
+          [[ "${REQUEST_CARGO_BUILD_JOBS}" =~ ^([1-9]|1[0-6])$ ]] || {
+            echo "CARGO_BUILD_JOBS must be between 1 and 16" >&2
+            exit 1
+          }
+          [[ "${REQUEST_ID_VALUE}" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$ ]] || {
+            echo "Invalid REQUEST_ID: ${REQUEST_ID_VALUE}" >&2
+            exit 1
+          }
+
+          if [[ -n "${EXPECTED_SOURCE_SHA}" && ! "${EXPECTED_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "SOURCE_SHA must be a lowercase 40-character commit SHA" >&2
+            exit 1
+          fi
+
+          rust_toolchain="$(tr -d '[:space:]' < source/api/rust-toolchain)"
+          [[ "${rust_toolchain}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "Invalid source/api/rust-toolchain: ${rust_toolchain}" >&2
+            exit 1
+          }
+
+          image_prefix="${REQUEST_IMAGE_PREFIX}"
+          if [[ -z "${image_prefix}" ]]; then
+            if [[ "${REQUEST_DEPLOY_ENV}" == 'staging' ]]; then
+              image_prefix='staging-cashsmartify'
+            else
+              image_prefix='cashsmartify'
+            fi
+          fi
+          [[ "${image_prefix}" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || {
+            echo "Invalid IMAGE_PREFIX: ${image_prefix}" >&2
+            exit 1
+          }
+
+          image_tag="${REQUEST_IMAGE_TAG}"
+          if [[ -z "${image_tag}" ]]; then
+            image_tag='latest'
+          fi
+          [[ "${image_tag}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] || {
+            echo "Invalid IMAGE_TAG: ${image_tag}" >&2
+            exit 1
+          }
+
+          if [[ "${REQUEST_DEPLOY_TARGET}" == 'BE Unit Test' || "${REQUEST_DEPLOY_TARGET}" == 'Solver Unit Test' || "${REQUEST_DEPLOY_TARGET}" == 'FE Unit Test' || "${REQUEST_DEPLOY_TARGET}" == 'All Unit Tests' ]]; then
+            build_images='false'
+          elif [[ "${REQUEST_PIPELINE_ACTION}" == 'Deploy Only' ]]; then
+            build_images='false'
+          else
+            build_images='true'
+          fi
+
+          {
+            echo "source_revision=${source_revision}"
+            echo "rust_toolchain=${rust_toolchain}"
+            echo "image_prefix=${image_prefix}"
+            echo "image_tag=${image_tag}"
+            echo "build_images=${build_images}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Jenkins CI request"
+            echo "- Source: \\`${REQUEST_SOURCE_REPO}@${source_revision}\\`"
+            echo "- Branch/ref: \\`${REQUEST_SOURCE_REF}\\`"
+            echo "- Environment: \\`${REQUEST_DEPLOY_ENV}\\`"
+            echo "- Target: \\`${REQUEST_DEPLOY_TARGET}\\`"
+            echo "- Action: \\`${REQUEST_PIPELINE_ACTION}\\`"
+            echo "- Image prefix: \\`${image_prefix}\\`"
+            echo "- Image tag: \\`${image_tag}\\`"
+            echo "- ARM64 only: \\`linux/arm64\\`"
+            echo "- Cargo jobs: \\`${REQUEST_CARGO_BUILD_JOBS}\\`"
+            echo "- Jenkins request: \\`${REQUEST_ID_VALUE}\\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Set up QEMU for ARM64
+        if: ${{ steps.config.outputs.build_images == 'true' }}
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        if: ${{ steps.config.outputs.build_images == 'true' }}
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: ${{ steps.config.outputs.build_images == 'true' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          # GITHUB_TOKEN works when IMAGE_OWNER is this repository owner. For a
+          # different owner, configure REGISTRY_USERNAME and REGISTRY_PASSWORD
+          # as secrets in this public CI repository.
+          username: ${{ secrets.REGISTRY_USERNAME || github.actor }}
+          password: ${{ secrets.REGISTRY_PASSWORD || github.token }}
+
+      - name: Run API unit tests
+        if: ${{ inputs.PIPELINE_ACTION != 'Deploy Only' && (inputs.DEPLOY_TARGET == 'BE Unit Test' || inputs.DEPLOY_TARGET == 'All Unit Tests' || ((inputs.DEPLOY_TARGET == 'BE' || inputs.DEPLOY_TARGET == 'API') && inputs.API_RUN_UNITTEST == 'true')) }}
+        continue-on-error: ${{ inputs.API_BYPASS_UNITTEST_FAILURE == 'true' && (inputs.DEPLOY_TARGET == 'BE' || inputs.DEPLOY_TARGET == 'API') }}
+        shell: bash
+        env:
+          RUST_TOOLCHAIN: ${{ steps.config.outputs.rust_toolchain }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}/source/api:/app" \
+            -w /app \
+            -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS}" \
+            "rust:${RUST_TOOLCHAIN}-slim-bookworm" \
+            bash -lc '
+              set -e
+              export CARGO_HOME=/tmp/cargo-home
+              export SQLX_OFFLINE=true
+              export RUSTFLAGS="-C link-arg=-fuse-ld=lld"
+              apt-get update
+              apt-get install -y --no-install-recommends pkg-config libssl-dev lld
+              cargo test --lib --tests --jobs "${CARGO_BUILD_JOBS}"
+            '
+
+      - name: Run solver unit tests
+        if: ${{ inputs.PIPELINE_ACTION != 'Deploy Only' && (inputs.DEPLOY_TARGET == 'Solver Unit Test' || inputs.DEPLOY_TARGET == 'All Unit Tests') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "${GITHUB_WORKSPACE}/source/solver:/app" \
+            -w /app \
+            python:3.11-slim \
+            sh -lc 'set -e; export HOME=/tmp/ci-home PYTHONUSERBASE=/tmp/ci-pyuser; mkdir -p /tmp/ci-home /tmp/ci-pyuser; python -m pip install --no-cache-dir --user -r requirements.txt pytest; python -m pytest tests -q -vv'
+
+      - name: Run frontend unit tests
+        if: ${{ inputs.PIPELINE_ACTION != 'Deploy Only' && (inputs.DEPLOY_TARGET == 'FE Unit Test' || inputs.DEPLOY_TARGET == 'All Unit Tests') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "${GITHUB_WORKSPACE}/source/ui:/app" \
+            -w /app \
+            node:20-bookworm-slim \
+            sh -lc 'set -e; npm ci; npm run test:unit'
+
+      - name: Build Rust dependency cache image
+        if: ${{ steps.config.outputs.build_images == 'true' && (inputs.DEPLOY_TARGET == 'BE' || inputs.DEPLOY_TARGET == 'BE Build' || inputs.DEPLOY_TARGET == 'API' || inputs.DEPLOY_TARGET == 'Worker' || inputs.DEPLOY_TARGET == 'Deps') }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ./source/api
+          file: ./source/api/Dockerfile.prod
+          target: cacher
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
+            ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-deps:rust-${{ steps.config.outputs.rust_toolchain }}
+          cache-from: |
+            type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-buildcache-deps:rust-${{ steps.config.outputs.rust_toolchain }}
+          cache-to: type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-buildcache-deps:rust-${{ steps.config.outputs.rust_toolchain }},mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            CARGO_BUILD_JOBS=${{ inputs.CARGO_BUILD_JOBS }}
+
+      - name: Build API image
+        id: api_image
+        if: ${{ steps.config.outputs.build_images == 'true' && (inputs.DEPLOY_TARGET == 'BE' || inputs.DEPLOY_TARGET == 'BE Build' || inputs.DEPLOY_TARGET == 'API') }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ./source/api
+          file: ./source/api/Dockerfile.prod
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          sbom: false
+          tags: ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-api:latest
+          cache-from: |
+            type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-buildcache-deps:rust-${{ steps.config.outputs.rust_toolchain }}
+            type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-buildcache-api:rust-${{ steps.config.outputs.rust_toolchain }}
+          cache-to: type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-buildcache-api:rust-${{ steps.config.outputs.rust_toolchain }},mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            CARGO_BUILD_JOBS=${{ inputs.CARGO_BUILD_JOBS }}
+            SOURCE_REVISION=${{ steps.config.outputs.source_revision }}
+
+      - name: Build worker image
+        id: worker_image
+        if: ${{ steps.config.outputs.build_images == 'true' && (inputs.DEPLOY_TARGET == 'BE' || inputs.DEPLOY_TARGET == 'BE Build' || inputs.DEPLOY_TARGET == 'Worker') }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ./source/api
+          file: ./source/api/Dockerfile.worker.prod
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          sbom: false
+          tags: ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-worker:latest
+          cache-from: |
+            type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-buildcache-deps:rust-${{ steps.config.outputs.rust_toolchain }}
+            type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-buildcache-worker:rust-${{ steps.config.outputs.rust_toolchain }}
+          cache-to: type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-buildcache-worker:rust-${{ steps.config.outputs.rust_toolchain }},mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            CARGO_BUILD_JOBS=${{ inputs.CARGO_BUILD_JOBS }}
+            SOURCE_REVISION=${{ steps.config.outputs.source_revision }}
+
+      - name: Build solver image
+        id: solver_image
+        if: ${{ steps.config.outputs.build_images == 'true' && (inputs.DEPLOY_TARGET == 'Solver') }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ./source/solver
+          file: ./source/solver/Dockerfile
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          sbom: false
+          tags: ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-solver:latest
+          cache-from: type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-solver:latest
+          cache-to: type=inline
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+      - name: Build UI image
+        id: ui_image
+        if: ${{ steps.config.outputs.build_images == 'true' && (inputs.DEPLOY_TARGET == 'UI') }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ./source/ui
+          file: ./source/ui/Dockerfile
+          target: production
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          sbom: false
+          tags: ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-ui:latest
+          cache-from: type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-ui:latest
+          cache-to: type=inline
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+      - name: Publish build result
+        if: ${{ success() }}
+        shell: bash
+        env:
+          SOURCE_REVISION: ${{ steps.config.outputs.source_revision }}
+          RUST_TOOLCHAIN: ${{ steps.config.outputs.rust_toolchain }}
+          IMAGE_PREFIX: ${{ steps.config.outputs.image_prefix }}
+          IMAGE_TAG: ${{ steps.config.outputs.image_tag }}
+          API_DIGEST: ${{ steps.api_image.outputs.digest }}
+          WORKER_DIGEST: ${{ steps.worker_image.outputs.digest }}
+          SOLVER_DIGEST: ${{ steps.solver_image.outputs.digest }}
+          UI_DIGEST: ${{ steps.ui_image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p build-result
+          cat > build-result/result.json <<JSON
+          {
+            "source_repository": "${{ inputs.SOURCE_REPO }}",
+            "source_ref": "${{ inputs.BRANCH }}",
+            "source_revision": "${SOURCE_REVISION}",
+            "environment": "${{ inputs.DEPLOY_ENV }}",
+            "deploy_target": "${{ inputs.DEPLOY_TARGET }}",
+            "pipeline_action": "${{ inputs.PIPELINE_ACTION }}",
+            "platform": "linux/arm64",
+            "image_owner": "${{ inputs.IMAGE_OWNER }}",
+            "image_prefix": "${IMAGE_PREFIX}",
+            "image_tag": "${IMAGE_TAG}",
+            "rust_toolchain": "${RUST_TOOLCHAIN}",
+            "images": {
+              "api": {"digest": "${API_DIGEST}"},
+              "worker": {"digest": "${WORKER_DIGEST}"},
+              "solver": {"digest": "${SOLVER_DIGEST}"},
+              "ui": {"digest": "${UI_DIGEST}"}
+            },
+            "request_id": "${{ inputs.REQUEST_ID }}"
+          }
+          JSON
+          cat build-result/result.json
+
+      - name: Upload build result
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-result-${{ inputs.REQUEST_ID }}
+          path: build-result/result.json
+          if-no-files-found: error
+          retention-days: 7
