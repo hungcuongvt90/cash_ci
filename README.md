@@ -20,7 +20,7 @@ Both staging and production run on ARM64. Every application image build in this 
 linux/arm64
 ```
 
-The GitHub-hosted runner uses QEMU and Docker Buildx. No `linux/amd64` image is built or published.
+The workflow uses the native GitHub-hosted `ubuntu-24.04-arm` runner and Docker Buildx. This avoids QEMU emulation for normal builds. QEMU is enabled only as a fallback when the runner is not ARM64. No `linux/amd64` image is built or published.
 
 ## Workflow
 
@@ -85,10 +85,10 @@ mcc-ci-dispatch-token
 
 | Jenkins target | GitHub CI behavior |
 |---|---|
-| `BE` | Build Rust dependency cache, API, and Worker images; optionally run API tests |
-| `BE Build` | Build Rust dependency cache, API, and Worker images |
-| `API` | Build Rust dependency cache and API image; optionally run API tests |
-| `Worker` | Build Rust dependency cache and Worker image |
+| `BE` | Pull or build the Rust dependency image, then build API and Worker images; optionally run API tests |
+| `BE Build` | Pull or build the Rust dependency image, then build API and Worker images |
+| `API` | Pull or build the Rust dependency image, then build the API image; optionally run API tests |
+| `Worker` | Pull or build the Rust dependency image, then build the Worker image |
 | `Solver` | Build Solver image |
 | `UI` | Build UI image |
 | `Deps` | Explicitly prebuild the Rust dependency cache image |

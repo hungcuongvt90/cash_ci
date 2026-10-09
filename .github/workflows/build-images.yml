@@ -128,7 +128,9 @@ env:
 jobs:
   ci:
     name: ${{ inputs.PIPELINE_ACTION }} ${{ inputs.DEPLOY_TARGET }} for linux/arm64
-    runs-on: ubuntu-24.04
+    # Native ARM64 avoids QEMU emulation for the ARM64-only deployment images.
+    # GitHub-hosted ARM64 runners are available to public repositories.
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 180
 
     steps:
@@ -282,8 +284,8 @@ jobs:
             echo "- Jenkins request: \\`${REQUEST_ID_VALUE}\\`"
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Set up QEMU for ARM64
-        if: ${{ steps.config.outputs.build_images == 'true' }}
+      - name: Set up QEMU for ARM64 when the runner is not native ARM64
+        if: ${{ steps.config.outputs.build_images == 'true' && runner.arch != 'ARM64' }}
         uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
