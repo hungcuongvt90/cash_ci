@@ -117,7 +117,7 @@ token: ${{ secrets.SOURCE_REPO_READ_TOKEN || github.token }}
 
 ## GHCR access
 
-The workflow logs in to GHCR with the workflow `GITHUB_TOKEN`:
+The workflow logs in to GHCR with the workflow `GITHUB_TOKEN` by default:
 
 ```yaml
 permissions:
@@ -125,9 +125,16 @@ permissions:
   packages: write
 ```
 
-This is required because `IMAGE_OWNER` is `hungcuongvt90`, the owner of this repository. The workflow does not use `REGISTRY_USERNAME` or `REGISTRY_PASSWORD`, preventing a stale read-only token from overriding the workflow package permission.
+Each pushed image also includes an `org.opencontainers.image.source` label pointing to this repository so GHCR can associate the package with `cash_ci`.
 
-If images must later be published to a different GHCR owner, implement that as a separately reviewed credentialed path. Do not pass registry credentials from Jenkins as dispatch inputs.
+If the owner namespace still rejects package creation, configure these `cash_ci` Actions secrets as a fallback:
+
+```text
+REGISTRY_USERNAME=hungcuongvt90
+REGISTRY_PASSWORD=<classic PAT with read:packages and write:packages>
+```
+
+Do not use the Jenkins dispatch token for GHCR, and do not pass registry credentials from Jenkins as dispatch inputs.
 
 ## Published image names
 

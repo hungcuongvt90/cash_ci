@@ -299,11 +299,11 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          # The workflow publishes to the same owner as this repository. Use the
-          # workflow token directly so a stale/read-only registry secret cannot
-          # override the packages: write permission above.
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
+          # The workflow token is the default for this repository owner. Optional
+          # registry secrets support a GHCR PAT when package creation/access is
+          # restricted for the owner namespace.
+          username: ${{ secrets.REGISTRY_USERNAME || github.actor }}
+          password: ${{ secrets.REGISTRY_PASSWORD || github.token }}
 
       - name: Pull Rust dependency image or mark it for build
         id: rust_deps
@@ -379,6 +379,8 @@ jobs:
           push: true
           provenance: false
           sbom: false
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           tags: |
             ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-deps:rust-${{ steps.config.outputs.rust_toolchain }}-${{ steps.config.outputs.dependency_fingerprint }}
           cache-from: |
@@ -401,6 +403,8 @@ jobs:
           push: true
           provenance: false
           sbom: false
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           tags: ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-api:latest
           cache-from: |
             type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-buildcache-deps:rust-${{ steps.config.outputs.rust_toolchain }}-${{ steps.config.outputs.dependency_fingerprint }}
@@ -423,6 +427,8 @@ jobs:
           push: true
           provenance: false
           sbom: false
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           tags: ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-worker:latest
           cache-from: |
             type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-buildcache-deps:rust-${{ steps.config.outputs.rust_toolchain }}-${{ steps.config.outputs.dependency_fingerprint }}
@@ -445,6 +451,8 @@ jobs:
           push: true
           provenance: false
           sbom: false
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           tags: ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-solver:latest
           cache-from: type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-solver:latest
           cache-to: type=inline
@@ -463,6 +471,8 @@ jobs:
           push: true
           provenance: false
           sbom: false
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           tags: ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-ui:latest
           cache-from: type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-ui:latest
           cache-to: type=inline
