@@ -91,7 +91,7 @@ mcc-ci-dispatch-token
 | `Worker` | Build Rust dependency cache and Worker image |
 | `Solver` | Build Solver image |
 | `UI` | Build UI image |
-| `Deps` | Build Rust dependency cache image |
+| `Deps` | Explicitly prebuild the Rust dependency cache image |
 | `BE Unit Test` | Run API unit tests |
 | `Solver Unit Test` | Run Solver Pytest suite |
 | `FE Unit Test` | Run UI Vitest suite |
@@ -158,6 +158,6 @@ ghcr.io/hungcuongvt90/staging-cashsmartify-ui:latest
 
 The environment prefix prevents staging and production from overwriting each other's images while retaining the `latest` tag used by the current Kubernetes deployments.
 
-Rust dependency images are fingerprinted from the Cargo manifests, toolchain, and Dockerfiles. If the fingerprinted dependency image already exists for the same environment, the workflow reuses it and skips the dependency-image build. A dependency change creates a new cache image automatically.
+The workflow fingerprints Rust dependency inputs from the Cargo manifests, toolchain, and Dockerfiles. For BE/API/Worker/Deps builds it first attempts to pull the matching ARM64 dependency image. If the image exists, it is reused; if it does not exist, the `cacher` target builds and pushes it. A dependency change creates a new cache image automatically.
 
 A `build-result-<REQUEST_ID>` artifact contains the source revision, image names, platform, and image digests for Jenkins diagnostics.

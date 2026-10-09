@@ -303,7 +303,7 @@ jobs:
           username: ${{ secrets.REGISTRY_USERNAME || github.actor }}
           password: ${{ secrets.REGISTRY_PASSWORD || github.token }}
 
-      - name: Check existing Rust dependency image
+      - name: Pull Rust dependency image or mark it for build
         id: rust_deps
         if: ${{ steps.config.outputs.build_images == 'true' && (inputs.DEPLOY_TARGET == 'BE' || inputs.DEPLOY_TARGET == 'BE Build' || inputs.DEPLOY_TARGET == 'API' || inputs.DEPLOY_TARGET == 'Worker' || inputs.DEPLOY_TARGET == 'Deps') }}
         shell: bash
@@ -311,11 +311,11 @@ jobs:
           RUST_DEPS_IMAGE: ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_prefix }}-rust-deps:rust-${{ steps.config.outputs.rust_toolchain }}-${{ steps.config.outputs.dependency_fingerprint }}
         run: |
           set -euo pipefail
-          if docker buildx imagetools inspect "${RUST_DEPS_IMAGE}" >/dev/null 2>&1; then
-            echo "Rust dependency image already exists: ${RUST_DEPS_IMAGE}"
+          if docker pull --platform linux/arm64 "${RUST_DEPS_IMAGE}"; then
+            echo "Reusing ARM64 Rust dependency image: ${RUST_DEPS_IMAGE}"
             echo 'exists=true' >> "${GITHUB_OUTPUT}"
           else
-            echo "Rust dependency image is missing: ${RUST_DEPS_IMAGE}"
+            echo "Rust dependency image is unavailable; it will be built: ${RUST_DEPS_IMAGE}"
             echo 'exists=false' >> "${GITHUB_OUTPUT}"
           fi
 
