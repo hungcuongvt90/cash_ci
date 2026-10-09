@@ -117,7 +117,7 @@ token: ${{ secrets.SOURCE_REPO_READ_TOKEN || github.token }}
 
 ## GHCR access
 
-The default login uses the workflow `GITHUB_TOKEN`:
+The workflow logs in to GHCR with the workflow `GITHUB_TOKEN`:
 
 ```yaml
 permissions:
@@ -125,16 +125,9 @@ permissions:
   packages: write
 ```
 
-This works when `IMAGE_OWNER` is the owner of this repository (`hungcuongvt90`) and package permissions allow the workflow to publish.
+This is required because `IMAGE_OWNER` is `hungcuongvt90`, the owner of this repository. The workflow does not use `REGISTRY_USERNAME` or `REGISTRY_PASSWORD`, preventing a stale read-only token from overriding the workflow package permission.
 
-For another GHCR owner, configure these secrets in `cash_ci`:
-
-```text
-REGISTRY_USERNAME
-REGISTRY_PASSWORD
-```
-
-Do not pass registry credentials from Jenkins as dispatch inputs.
+If images must later be published to a different GHCR owner, implement that as a separately reviewed credentialed path. Do not pass registry credentials from Jenkins as dispatch inputs.
 
 ## Published image names
 
