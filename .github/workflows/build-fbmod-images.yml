@@ -1,0 +1,238 @@
+name: FBMod API/UI Images
+
+run-name: >-
+  ${{ inputs.PIPELINE_ACTION }} / ${{ inputs.DEPLOY_ENV }} /
+  ${{ inputs.DEPLOY_TARGET }} / ${{ inputs.IMAGE_TAG || 'source-sha' }} /
+  ${{ inputs.REQUEST_ID }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      DEPLOY_ENV:
+        description: Deployment environment used for image naming
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+        default: staging
+      DEPLOY_TARGET:
+        description: FBMod component to build
+        required: true
+        type: choice
+        options:
+          - API
+          - UI
+        default: API
+      PIPELINE_ACTION:
+        description: Build action requested by Jenkins
+        required: true
+        type: choice
+        options:
+          - Build+Deploy
+          - Build Only
+        default: Build+Deploy
+      SOURCE_REPO:
+        description: Source repository in owner/repository form
+        required: true
+        type: string
+        default: hungcuongvt90/fbmod
+      BRANCH:
+        description: Branch, tag, or commit to build
+        required: true
+        type: string
+        default: master
+      SOURCE_SHA:
+        description: Expected 40-character SHA checked out by Jenkins
+        required: true
+        type: string
+      IMAGE_OWNER:
+        description: GHCR owner used in image names
+        required: true
+        type: string
+        default: hungcuongvt90
+      IMAGE_TAG:
+        description: Immutable image tag; Jenkins uses the source commit SHA
+        required: true
+        type: string
+      REQUEST_ID:
+        description: Jenkins correlation/build identifier
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: fbmod-${{ inputs.DEPLOY_ENV }}-${{ inputs.DEPLOY_TARGET }}-${{ inputs.IMAGE_TAG }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ inputs.PIPELINE_ACTION }} ${{ inputs.DEPLOY_TARGET }} for linux/amd64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.SOURCE_REPO }}
+          ref: ${{ inputs.BRANCH }}
+          token: ${{ secrets.SOURCE_REPO_READ_TOKEN || github.token }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate Jenkins request and resolve image names
+        id: config
+        shell: bash
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.SOURCE_SHA }}
+          REQUEST_SOURCE_REPO: ${{ inputs.SOURCE_REPO }}
+          REQUEST_SOURCE_REF: ${{ inputs.BRANCH }}
+          REQUEST_DEPLOY_ENV: ${{ inputs.DEPLOY_ENV }}
+          REQUEST_DEPLOY_TARGET: ${{ inputs.DEPLOY_TARGET }}
+          REQUEST_PIPELINE_ACTION: ${{ inputs.PIPELINE_ACTION }}
+          REQUEST_IMAGE_OWNER: ${{ inputs.IMAGE_OWNER }}
+          REQUEST_IMAGE_TAG: ${{ inputs.IMAGE_TAG }}
+          REQUEST_ID_VALUE: ${{ inputs.REQUEST_ID }}
+        run: |
+          set -euo pipefail
+
+          source_revision="$(git -C source rev-parse HEAD)"
+          if [[ "${source_revision}" != "${EXPECTED_SOURCE_SHA}" ]]; then
+            echo "Checked out ${source_revision}, but Jenkins requested ${EXPECTED_SOURCE_SHA}" >&2
+            exit 1
+          fi
+          [[ "${REQUEST_SOURCE_REPO}" == 'hungcuongvt90/fbmod' ]] || {
+            echo "SOURCE_REPO must be hungcuongvt90/fbmod" >&2
+            exit 1
+          }
+          [[ "${REQUEST_SOURCE_REF}" =~ ^[A-Za-z0-9._/-]+$ ]] || {
+            echo "Invalid BRANCH: ${REQUEST_SOURCE_REF}" >&2
+            exit 1
+          }
+          [[ "${REQUEST_DEPLOY_ENV}" =~ ^(staging|production)$ ]] || {
+            echo "Invalid DEPLOY_ENV: ${REQUEST_DEPLOY_ENV}" >&2
+            exit 1
+          }
+          [[ "${REQUEST_DEPLOY_TARGET}" =~ ^(API|UI)$ ]] || {
+            echo "Invalid DEPLOY_TARGET: ${REQUEST_DEPLOY_TARGET}" >&2
+            exit 1
+          }
+          [[ "${REQUEST_PIPELINE_ACTION}" =~ ^(Build\+Deploy|Build\ Only)$ ]] || {
+            echo "Invalid PIPELINE_ACTION: ${REQUEST_PIPELINE_ACTION}" >&2
+            exit 1
+          }
+          [[ "${REQUEST_IMAGE_OWNER}" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || {
+            echo "Invalid IMAGE_OWNER: ${REQUEST_IMAGE_OWNER}" >&2
+            exit 1
+          }
+          [[ "${EXPECTED_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "SOURCE_SHA must be a lowercase 40-character SHA" >&2
+            exit 1
+          }
+          [[ "${REQUEST_IMAGE_TAG}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] || {
+            echo "Invalid IMAGE_TAG: ${REQUEST_IMAGE_TAG}" >&2
+            exit 1
+          }
+          [[ "${REQUEST_ID_VALUE}" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$ ]] || {
+            echo "Invalid REQUEST_ID: ${REQUEST_ID_VALUE}" >&2
+            exit 1
+          }
+          test -f source/api/Dockerfile
+          test -f source/ui/Dockerfile
+
+          if [[ "${REQUEST_DEPLOY_TARGET}" == 'API' ]]; then
+            image_name="fbmod-api-${REQUEST_DEPLOY_ENV}"
+          else
+            image_name="fbmod-web-${REQUEST_DEPLOY_ENV}"
+          fi
+
+          {
+            echo "source_revision=${source_revision}"
+            echo "image_name=${image_name}"
+            echo "image_tag=${REQUEST_IMAGE_TAG}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Jenkins FBMod image request"
+            echo "- Source: \`${REQUEST_SOURCE_REPO}@${source_revision}\`"
+            echo "- Branch/ref: \`${REQUEST_SOURCE_REF}\`"
+            echo "- Environment: \`${REQUEST_DEPLOY_ENV}\`"
+            echo "- Target: \`${REQUEST_DEPLOY_TARGET}\`"
+            echo "- Action: \`${REQUEST_PIPELINE_ACTION}\`"
+            echo "- Image: \`ghcr.io/${REQUEST_IMAGE_OWNER}/${image_name}:${REQUEST_IMAGE_TAG}\`"
+            echo "- Platform: \`linux/amd64\`"
+            echo "- Jenkins request: \`${REQUEST_ID_VALUE}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.REGISTRY_USERNAME || github.actor }}
+          password: ${{ secrets.REGISTRY_PASSWORD || github.token }}
+
+      - name: Build API image
+        if: ${{ inputs.DEPLOY_TARGET == 'API' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ./source
+          file: ./source/api/Dockerfile
+          platforms: linux/amd64
+          pull: true
+          push: true
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          tags: ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_name }}:${{ steps.config.outputs.image_tag }}
+          cache-from: type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_name }}-buildcache:amd64
+          cache-to: type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_name }}-buildcache:amd64,mode=max
+
+      - name: Build UI image
+        if: ${{ inputs.DEPLOY_TARGET == 'UI' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ./source
+          file: ./source/ui/Dockerfile
+          platforms: linux/amd64
+          pull: true
+          push: true
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          tags: ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_name }}:${{ steps.config.outputs.image_tag }}
+          cache-from: type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_name }}-buildcache:amd64
+          cache-to: type=registry,ref=ghcr.io/${{ inputs.IMAGE_OWNER }}/${{ steps.config.outputs.image_name }}-buildcache:amd64,mode=max
+
+      - name: Publish build result
+        shell: bash
+        env:
+          IMAGE_OWNER: ${{ inputs.IMAGE_OWNER }}
+          IMAGE_NAME: ${{ steps.config.outputs.image_name }}
+          IMAGE_TAG: ${{ steps.config.outputs.image_tag }}
+          SOURCE_REVISION: ${{ steps.config.outputs.source_revision }}
+          REQUEST_ID: ${{ inputs.REQUEST_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p build-result
+          {
+            echo "source_revision=${SOURCE_REVISION}"
+            echo "image=ghcr.io/${IMAGE_OWNER}/${IMAGE_NAME}:${IMAGE_TAG}"
+            echo "platform=linux/amd64"
+            echo "request_id=${REQUEST_ID}"
+          } | tee "build-result/result.txt"
+
+      - name: Upload build result
+        uses: actions/upload-artifact@v4
+        with:
+          name: fbmod-build-result-${{ inputs.REQUEST_ID }}
+          path: build-result/result.txt
+          if-no-files-found: error

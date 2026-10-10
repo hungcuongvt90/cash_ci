@@ -28,6 +28,30 @@ The workflow uses the native GitHub-hosted `ubuntu-24.04-arm` runner and Docker 
 .github/workflows/build-images.yml
 ```
 
+## FBMod API/UI workflow
+
+FBMod API and UI image builds use the separate workflow:
+
+```text
+.github/workflows/build-fbmod-images.yml
+```
+
+It is triggered by the FBMod production/staging Jenkinsfiles and performs only
+API/UI image builds. It does not build, publish, or modify the FBMod APK
+workflow. The runner is native `ubuntu-24.04` AMD64 and publishes only
+`linux/amd64` images:
+
+```text
+ghcr.io/hungcuongvt90/fbmod-api-production:<commit-sha>
+ghcr.io/hungcuongvt90/fbmod-api-staging:<commit-sha>
+ghcr.io/hungcuongvt90/fbmod-web-production:<commit-sha>
+ghcr.io/hungcuongvt90/fbmod-web-staging:<commit-sha>
+```
+
+The `SOURCE_REPO_READ_TOKEN` secret must have Contents: Read access to the
+private `hungcuongvt90/fbmod` repository, if that repository is private. The
+Jenkins dispatch credential is separate from the GHCR publishing credentials.
+
 ## Jenkins dispatch contract
 
 Jenkins triggers the workflow with `workflow_dispatch` inputs matching the current Jenkins parameters:
